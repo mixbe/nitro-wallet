@@ -31,17 +31,19 @@ import (
 type accountTable struct {
 	KeyId               string
 	Name                string
+	ChainType           string
 	Address             string
 	EncryptedDataKey    string
 	EncryptedPrivateKey string
 }
 
 type accountClient struct {
-	region       string
-	ddbTableName string
-	keyId        string
-	cid          uint32
-	port         uint32
+	region           string
+	ddbTableName     string
+	keyId            string
+	cid              uint32
+	port             uint32
+	defaultChainType string
 }
 
 type generateAccountResponse struct {
@@ -56,13 +58,14 @@ type requestPlayload struct {
 	Aws_secret_access_key string
 	Aws_session_token     string
 	KeyId                 string // this is for generateAccount
+	ChainType             string // chain type (EVM, SOLANA, etc.)
 	//this 3 is for sign
 	EncryptedPrivateKey string
 	EncryptedDataKey    string
 	Transaction         string
 }
 
-func (ac accountClient) generateAccount(name string) {
+func (ac accountClient) generateAccount(name string, chainType string) {
 	credential := getIAMTokenV2()
 
 	socket, err := unix.Socket(unix.AF_VSOCK, unix.SOCK_STREAM, 0)
@@ -80,12 +83,19 @@ func (ac accountClient) generateAccount(name string) {
 		log.Fatal(err)
 	}
 
+	// If chainType is empty, use the default chain type
+	if chainType == "" {
+		chainType = ac.defaultChainType
+		fmt.Println("Using default chain type:", chainType)
+	}
+
 	playload := requestPlayload{
 		ApiCall:               "generateAccount",
 		Aws_access_key_id:     credential.aws_access_key_id,
 		Aws_secret_access_key: credential.aws_secret_access_key,
 		Aws_session_token:     credential.aws_session_token,
 		KeyId:                 ac.keyId,
+		ChainType:             chainType,
 		EncryptedPrivateKey:   "",
 		EncryptedDataKey:      "",
 		Transaction:           "",
@@ -107,11 +117,11 @@ func (ac accountClient) generateAccount(name string) {
 	var responseStruct generateAccountResponse
 	json.Unmarshal(response[:n], &responseStruct)
 
-	ac.saveEncryptAccountToDDB(name, responseStruct, ac.keyId)
+	ac.saveEncryptAccountToDDB(name, responseStruct, ac.keyId, chainType)
 
 }
 
-func (ac accountClient) saveEncryptAccountToDDB(name string, response generateAccountResponse, keyId string) {
+func (ac accountClient) saveEncryptAccountToDDB(name string, response generateAccountResponse, keyId string, chainType string) {
 	// Create Session
 	sess, err := session.NewSession(&aws.Config{
 		Region: aws.String(ac.region)},
@@ -126,6 +136,7 @@ func (ac accountClient) saveEncryptAccountToDDB(name string, response generateAc
 	at := accountTable{
 		Name:                name,
 		KeyId:               keyId,
+		ChainType:           chainType,
 		Address:             response.Address,
 		EncryptedPrivateKey: response.EncryptedPrivateKey,
 		EncryptedDataKey:    response.EncryptedDataKey,
@@ -151,7 +162,7 @@ func (ac accountClient) saveEncryptAccountToDDB(name string, response generateAc
 	fmt.Println("account", name, "info is saved to dynamodb")
 }
 
-func (ac accountClient) sign(keyId string, name string, transaction string) string {
+func (ac accountClient) sign(keyId string, name string, chainType string, transaction string) string {
 	credential := getIAMTokenV2()
 	// get item from dynamodb
 	sess, err := session.NewSession(&aws.Config{
@@ -172,6 +183,9 @@ func (ac accountClient) sign(keyId string, name string, transaction string) stri
 			},
 			"Name": {
 				S: aws.String(name),
+			},
+			"ChainType": {
+				S: aws.String(chainType),
 			},
 		},
 	})
@@ -211,6 +225,7 @@ func (ac accountClient) sign(keyId string, name string, transaction string) stri
 		Aws_secret_access_key: credential.aws_secret_access_key,
 		Aws_session_token:     credential.aws_session_token,
 		KeyId:                 "",
+		ChainType:             chainType,
 		EncryptedPrivateKey:   encryptedPrivateKey,
 		EncryptedDataKey:      encryptedDataKey,
 		Transaction:           transaction,
@@ -394,6 +409,10 @@ func main() {
 					AttributeName: aws.String("Name"),
 					AttributeType: aws.String("S"),
 				},
+				{
+					AttributeName: aws.String("ChainType"),
+					AttributeType: aws.String("S"),
+				},
 			},
 			KeySchema: []*dynamodb.KeySchemaElement{
 				{
@@ -403,6 +422,28 @@ func main() {
 				{
 					AttributeName: aws.String("Name"),
 					KeyType:       aws.String("RANGE"),
+				},
+			},
+			GlobalSecondaryIndexes: []*dynamodb.GlobalSecondaryIndex{
+				{
+					IndexName: aws.String("ChainTypeIndex"),
+					KeySchema: []*dynamodb.KeySchemaElement{
+						{
+							AttributeName: aws.String("KeyId"),
+							KeyType:       aws.String("HASH"),
+						},
+						{
+							AttributeName: aws.String("ChainType"),
+							KeyType:       aws.String("RANGE"),
+						},
+					},
+					Projection: &dynamodb.Projection{
+						ProjectionType: aws.String("ALL"),
+					},
+					ProvisionedThroughput: &dynamodb.ProvisionedThroughput{
+						ReadCapacityUnits:  aws.Int64(5),
+						WriteCapacityUnits: aws.Int64(5),
+					},
 				},
 			},
 			ProvisionedThroughput: &dynamodb.ProvisionedThroughput{
@@ -421,8 +462,15 @@ func main() {
 		time.Sleep(10 * 1000 * time.Millisecond)
 	}
 
-	client := accountClient{region, tableName, keyId, 16, 5000}
-	client.generateAccount(walletAccountName)
+	// Default to EVM for backward compatibility
+	defaultChainType := "EVM"
+	client := accountClient{region, tableName, keyId, 16, 5000, defaultChainType}
+	// Generate an EVM account
+	client.generateAccount(walletAccountName, "EVM")
+	
+	// Generate a Solana account with a different name
+	solanaAccountName := "solana_account1"
+	client.generateAccount(solanaAccountName, "SOLANA")
 
 	//test sign
 	transaction := map[string]interface{}{
@@ -439,6 +487,7 @@ func main() {
 		fmt.Fprintf(b, "%s=\"%s\"\n", key, value)
 	}
 
-	signedValue := client.sign(keyId, walletAccountName, b.String())
+	// Sign with the EVM account
+	signedValue := client.sign(keyId, walletAccountName, "EVM", b.String())
 	fmt.Println("signedValue:", signedValue)
 }
