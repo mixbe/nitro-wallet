@@ -5,6 +5,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
@@ -19,6 +20,8 @@ import (
 
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/gagliardetto/solana-go"
+	"github.com/mr-tron/base58"
 )
 
 type requestPlayload struct {
@@ -27,6 +30,7 @@ type requestPlayload struct {
 	Aws_secret_access_key string
 	Aws_session_token     string
 	KeyId                 string // this is for generateAccount
+	ChainType             string // chain type (EVM, SOLANA, etc.)
 	//this 3 is for sign
 	EncryptedPrivateKey string
 	EncryptedDataKey    string
@@ -118,33 +122,62 @@ func call_kms_decrypt(aws_access_key_id string, aws_secret_access_key string, aw
 	return result
 }
 
-func generateAccount(aws_access_key_id string, aws_secret_access_key string, aws_session_token string, keyId string) generateAccountResponse {
-	privateKey, err := crypto.GenerateKey()
-	if err != nil {
-		log.Fatal(err)
+func generateAccount(aws_access_key_id string, aws_secret_access_key string, aws_session_token string, keyId string, chainType string) generateAccountResponse {
+	var privateKeyBytes []byte
+	var address string
+
+	// Default to EVM if chainType is not specified
+	if chainType == "" {
+		chainType = "EVM"
 	}
 
-	privateKeyBytes := crypto.FromECDSA(privateKey)
-	fmt.Println("SAVE BUT DO NOT SHARE THIS (Private Key):", hexutil.Encode(privateKeyBytes))
+	// Convert to uppercase for consistent comparison
+	chainType = strings.ToUpper(chainType)
 
-	publicKey := privateKey.Public()
-	publicKeyECDSA, ok := publicKey.(*ecdsa.PublicKey)
-	if !ok {
-		log.Fatal("cannot assert type: publicKey is not of type *ecdsa.PublicKey")
+	switch chainType {
+	case "EVM":
+		// Generate EVM address
+		privateKey, err := crypto.GenerateKey()
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		privateKeyBytes = crypto.FromECDSA(privateKey)
+		fmt.Println("SAVE BUT DO NOT SHARE THIS (Private Key):", hexutil.Encode(privateKeyBytes))
+
+		publicKey := privateKey.Public()
+		publicKeyECDSA, ok := publicKey.(*ecdsa.PublicKey)
+		if !ok {
+			log.Fatal("cannot assert type: publicKey is not of type *ecdsa.PublicKey")
+		}
+
+		publicKeyBytes := crypto.FromECDSAPub(publicKeyECDSA)
+		fmt.Println("Public Key:", hexutil.Encode(publicKeyBytes))
+
+		address = crypto.PubkeyToAddress(*publicKeyECDSA).Hex()
+		fmt.Println("EVM Address:", address)
+
+	case "SOLANA":
+		// Generate Solana address
+		account := solana.NewWallet()
+		privateKeyBytes = account.PrivateKey
+		fmt.Println("SAVE BUT DO NOT SHARE THIS (Private Key):", base58.Encode(privateKeyBytes))
+
+		address = account.PublicKey().String()
+		fmt.Println("Solana Address:", address)
+
+	default:
+		log.Fatalf("Unsupported chain type: %s", chainType)
 	}
 
-	publicKeyBytes := crypto.FromECDSAPub(publicKeyECDSA)
-	fmt.Println("Public Key:", hexutil.Encode(publicKeyBytes))
-
-	address := crypto.PubkeyToAddress(*publicKeyECDSA).Hex()
-	fmt.Println("Address:", address)
-
+	// Generate and encrypt data key using AWS KMS
 	datakeys := call_kms_generate_datakey(aws_access_key_id, aws_secret_access_key, aws_session_token, keyId)
 	datakey_plaintext_base64 := datakeys.datakey_plaintext_base64
 	datakey_ciphertext_base64 := datakeys.datakey_ciphertext_base64
 
 	datakey_plaintext, _ := base64.StdEncoding.DecodeString(datakey_plaintext_base64)
 
+	// Encrypt the private key
 	encryptedPrivateKey := encrypt([]byte(datakey_plaintext), string(privateKeyBytes))
 
 	response := generateAccountResponse{
@@ -155,27 +188,63 @@ func generateAccount(aws_access_key_id string, aws_secret_access_key string, aws
 	return response
 }
 
-func sign(aws_access_key_id string, aws_secret_access_key string, aws_session_token string, encryptedDataKey string, encryptedPrivateKey string, transaction string) []byte {
+func sign(aws_access_key_id string, aws_secret_access_key string, aws_session_token string, encryptedDataKey string, encryptedPrivateKey string, transaction string, chainType string) []byte {
+	// Decrypt the data key using AWS KMS
 	datakey_plaintext_base64 := call_kms_decrypt(aws_access_key_id, aws_secret_access_key, aws_session_token, encryptedDataKey)
 	datakey_plaintext_base64_string := strings.TrimSpace(strings.Split(datakey_plaintext_base64, ":")[1])
 	datakey_plaintext, err := base64.StdEncoding.DecodeString(datakey_plaintext_base64_string)
 	if err != nil {
 		log.Fatal("datakey", err)
 	}
+	
+	// Decrypt the private key using the data key
 	private_key := decrypt(datakey_plaintext, encryptedPrivateKey)
-	privateKey, err := crypto.ToECDSA([]byte(private_key))
-	if err != nil {
-		log.Fatal("privateKey error", err)
+	
+	// Default to EVM if chainType is not specified
+	if chainType == "" {
+		chainType = "EVM"
 	}
-	data := []byte(transaction)
-	hash := crypto.Keccak256Hash(data)
-	signature, err := crypto.Sign(hash.Bytes(), privateKey)
-	if err != nil {
-		log.Fatal(err)
+	
+	// Convert to uppercase for consistent comparison
+	chainType = strings.ToUpper(chainType)
+	
+	var signature []byte
+	
+	switch chainType {
+	case "EVM":
+		// EVM signing process
+		privateKey, err := crypto.ToECDSA([]byte(private_key))
+		if err != nil {
+			log.Fatal("EVM privateKey error", err)
+		}
+		data := []byte(transaction)
+		hash := crypto.Keccak256Hash(data)
+		signature, err = crypto.Sign(hash.Bytes(), privateKey)
+		if err != nil {
+			log.Fatal("EVM signing error:", err)
+		}
+		fmt.Println("EVM signature hex:", hexutil.Encode(signature))
+		
+	case "SOLANA":
+		// Solana signing process
+		privKeyBytes := []byte(private_key)
+		
+		// Create a new Solana wallet from the private key
+		account, err := solana.WalletFromPrivateKeyBytes(privKeyBytes)
+		if err != nil {
+			log.Fatal("Solana wallet creation error:", err)
+		}
+		
+		// Sign the transaction data
+		data := []byte(transaction)
+		signature = ed25519.Sign(account.PrivateKey, data)
+		fmt.Println("Solana signature base58:", base58.Encode(signature))
+		
+	default:
+		log.Fatalf("Unsupported chain type for signing: %s", chainType)
 	}
-	fmt.Println("hex:", hexutil.Encode(signature))
-	fmt.Println("byte", signature)
-
+	
+	fmt.Println("Signature bytes:", signature)
 	return signature
 }
 
@@ -289,8 +358,16 @@ func main() {
 		fmt.Println(apiCall)
 
 		if apiCall == "generateAccount" {
+			// Default to EVM if ChainType is not specified
+			chainType := playload.ChainType
+			if chainType == "" {
+				chainType = "EVM"
+				fmt.Println("No chain type specified, defaulting to EVM")
+			}
+			fmt.Println("Generating account for chain type:", chainType)
+			
 			result := generateAccount(playload.Aws_access_key_id, playload.Aws_secret_access_key,
-				playload.Aws_session_token, playload.KeyId)
+				playload.Aws_session_token, playload.KeyId, chainType)
 
 			b, err := json.Marshal(result)
 			if err != nil {
@@ -298,14 +375,21 @@ func main() {
 			}
 			//  send back to parent instance
 			unix.Write(nfd, b)
-			fmt.Println("generateAccount finished")
+			fmt.Println("generateAccount finished for chain type:", chainType)
 		} else if apiCall == "sign" {
-			fmt.Println("sign request")
+			// Default to EVM if ChainType is not specified
+			chainType := playload.ChainType
+			if chainType == "" {
+				chainType = "EVM"
+				fmt.Println("No chain type specified for signing, defaulting to EVM")
+			}
+			fmt.Println("Sign request for chain type:", chainType)
+			
 			result := sign(playload.Aws_access_key_id, playload.Aws_secret_access_key, playload.Aws_session_token,
-				playload.EncryptedDataKey, playload.EncryptedPrivateKey, playload.Transaction)
+				playload.EncryptedDataKey, playload.EncryptedPrivateKey, playload.Transaction, chainType)
 			fmt.Println("result is:", result)
 			unix.Write(nfd, result)
-			fmt.Println("sign fihished")
+			fmt.Println("sign finished for chain type:", chainType)
 		} else {
 			fmt.Println("nothing to do")
 		}
