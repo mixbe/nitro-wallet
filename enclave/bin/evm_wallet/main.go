@@ -124,7 +124,7 @@ func signTx(to string, value float64, nonce uint64, chainId int64, gasLimit uint
 func broadcastTx(rawTxHex string, rpcURL string) {
 	fmt.Println("开始广播交易...")
 	fmt.Println("连接到 RPC 节点:", rpcURL)
-	fmt.Println("broadcastTx | 1 rawTxHex: ", rawTxHex)
+	fmt.Println("broadcastTx | rawTxHex: ", rawTxHex)
 
 	// 连接到以太坊节点
 	client, err := ethclient.Dial(rpcURL)
@@ -132,7 +132,6 @@ func broadcastTx(rawTxHex string, rpcURL string) {
 		log.Fatal("连接 RPC 失败:", err)
 	}
 	fmt.Println("成功连接到节点")
-	fmt.Println("broadcastTx | 2 rawTxHex: ", rawTxHex)
 
 	// 检查连接是否正常
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -145,11 +144,7 @@ func broadcastTx(rawTxHex string, rpcURL string) {
 	}
 	fmt.Println("当前网络 Chain ID:", chainID)
 
-	fmt.Println("broadcastTx | 3 rawTxHex: ", rawTxHex)
-
 	// 验证原始交易数据
-	// fmt.Println("broadcastTx | 原始交易数据(十六进制):", rawTxHex)
-	fmt.Println("broadcastTx | 4 rawTxHex: ", rawTxHex)
 
 	fmt.Println("原始交易数据长度(十六进制):", len(rawTxHex), "字符")
 
@@ -164,6 +159,8 @@ func broadcastTx(rawTxHex string, rpcURL string) {
 		log.Fatal("解码交易数据失败:", err)
 	}
 	fmt.Println("原始交易数据长度(字节):", len(rawTx), "字节")
+	// []byte to string
+	fmt.Println("rawTx: ", hex.EncodeToString(rawTx))
 
 	// 使用正确的方法解析交易
 	tx := new(types.Transaction)
@@ -224,76 +221,20 @@ func broadcastTx(rawTxHex string, rpcURL string) {
 	fmt.Println("可以在区块链浏览器中查看交易状态")
 }
 
-// 对任意字符串做 secp256k1 签名
-func signString(message string) string {
-	privHex, err := os.ReadFile("evm_wallet.key")
-	if err != nil {
-		log.Fatal("读取私钥文件失败:", err)
-	}
-	privBytes, err := hex.DecodeString(strings.TrimSpace(string(privHex)))
-	if err != nil {
-		log.Fatal("解码私钥失败:", err)
-	}
-	privKey, err := crypto.ToECDSA(privBytes)
-	if err != nil {
-		log.Fatal("转换私钥失败:", err)
-	}
-	hash := crypto.Keccak256Hash([]byte(message))
-	signature, err := crypto.Sign(hash.Bytes(), privKey)
-	if err != nil {
-		log.Fatal("签名失败:", err)
-	}
-	fmt.Println("签名数据(hex):", hex.EncodeToString(signature))
-	return hex.EncodeToString(signature)
-}
-
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Println("用法: go run main.go [gen|sign|send|send-file|sign-string]")
+		fmt.Println("用法: go run main.go [gen|sign|send]")
 		fmt.Println("\n命令说明:")
-		fmt.Println("  gen        : 生成 EVM 地址，并保存私钥到 evm_wallet.key")
-		fmt.Println("  sign       : 离线签名交易，生成原始交易数据")
-		fmt.Println("               用法: go run main.go sign [to] [value] [nonce] [chainId] [gasLimit] [gasPriceGwei]")
-		fmt.Println("               示例: go run main.go sign 0x5e418ee491709c9547a33bd79253b41f1e7eb8f8 0.0001 0 97 21000 10")
-		fmt.Println("  send       : 广播已签名交易到链上")
-		fmt.Println("               用法: go run main.go send [rawTxHex] [rpcURL]")
-		fmt.Println("               示例: go run main.go send <rawTxHex> https://api.zan.top/bsc-testnet")
-		fmt.Println("  send-file  : 从文件读取签名交易并广播到链上（推荐，避免复制粘贴错误）")
-		fmt.Println("               用法: go run main.go send-file [txFile] [rpcURL]")
-		fmt.Println("               示例: go run main.go send-file signed_tx.hex https://api.zan.top/bsc-testnet")
-		fmt.Println("  sign-string: 对任意字符串做 secp256k1 签名（用于测试）")
-		fmt.Println("               用法: go run main.go sign-string \"要签名的消息\"")
+		fmt.Println("  gen  : 生成 EVM 地址，并保存私钥到 evm_wallet.key")
+		fmt.Println("  sign : 离线签名交易，生成原始交易数据")
+		fmt.Println("         用法: go run main.go sign [to] [value] [nonce] [chainId] [gasLimit] [gasPriceGwei]")
+		fmt.Println("         示例: go run main.go sign 0x5e418ee491709c9547a33bd79253b41f1e7eb8f8 0.0001 0 97 21000 10")
+		fmt.Println("  send : 广播已签名交易到链上")
+		fmt.Println("         用法: go run main.go send [rawTxHex] [rpcURL]")
+		fmt.Println("         示例: go run main.go send <rawTxHex> https://bsc-testnet-rpc.publicnode.com")
 		return
 	}
 	cmd := os.Args[1]
-	if cmd == "send-file" {
-		if len(os.Args) < 4 {
-			fmt.Println("用法: go run main.go send-file [txFile] [rpcURL]")
-			fmt.Println("示例: go run main.go send-file signed_tx.hex https://api.zan.top/bsc-testnet")
-			return
-		}
-		txFile := os.Args[2]
-		rpcURL := os.Args[3]
-
-		// 从文件读取签名交易数据
-		rawTxHex, err := os.ReadFile(txFile)
-		if err != nil {
-			log.Fatal("读取交易文件失败:", err)
-		}
-
-		// 广播交易
-		broadcastTx(strings.TrimSpace(string(rawTxHex)), rpcURL)
-		return
-	}
-	if cmd == "sign-string" {
-		if len(os.Args) < 3 {
-			fmt.Println("用法: go run main.go sign-string \"要签名的消息字符串\"")
-			return
-		}
-		message := os.Args[2]
-		signString(message)
-		return
-	}
 	if cmd == "gen" {
 		generateAddress()
 	} else if cmd == "sign" {
@@ -318,7 +259,7 @@ func main() {
 	} else if cmd == "send" {
 		if len(os.Args) < 4 {
 			fmt.Println("用法: go run main.go send [rawTxHex] [rpcURL]")
-			fmt.Println("示例: go run main.go send <rawTxHex> https://bsc-testnet.drpc.org")
+			fmt.Println("示例: go run main.go send <rawTxHex>https://bsc-testnet-rpc.publicnode.com")
 			return
 		}
 		rawTxHex := os.Args[2]

@@ -20,10 +20,6 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// dynamodb design
-// table name: AccountTable
-
-// colume:
 // keyId: kms alias id which used for encryption for the private key
 // Name: account name for this Account
 // encryptedPrivateKey: encrypted Account private key
@@ -33,25 +29,9 @@ import (
 type accountTable struct {
 	KeyId               string
 	Name                string
-	ChainType           string
 	Address             string
 	EncryptedDataKey    string
 	EncryptedPrivateKey string
-}
-
-type accountClient struct {
-	region           string
-	ddbTableName     string
-	keyId            string
-	cid              uint32
-	port             uint32
-	defaultChainType string
-}
-
-type generateAccountResponse struct {
-	EncryptedPrivateKey string
-	Address             string
-	EncryptedDataKey    string
 }
 
 type requestPlayload struct {
@@ -67,192 +47,30 @@ type requestPlayload struct {
 	Transaction         string
 }
 
-func (ac accountClient) generateAccount(name string, chainType string) {
-	credential := getIAMTokenV2()
-
-	socket, err := unix.Socket(unix.AF_VSOCK, unix.SOCK_STREAM, 0)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	sockaddr := &unix.SockaddrVM{
-		CID:  ac.cid,
-		Port: ac.port,
-	}
-
-	err = unix.Connect(socket, sockaddr)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	// If chainType is empty, use the default chain type
-	if chainType == "" {
-		chainType = ac.defaultChainType
-		fmt.Println("Using default chain type:", chainType)
-	}
-
-	playload := requestPlayload{
-		ApiCall:               "generateAccount",
-		Aws_access_key_id:     credential.aws_access_key_id,
-		Aws_secret_access_key: credential.aws_secret_access_key,
-		Aws_session_token:     credential.aws_session_token,
-		KeyId:                 ac.keyId,
-		ChainType:             chainType,
-		EncryptedPrivateKey:   "",
-		EncryptedDataKey:      "",
-		Transaction:           "",
-	}
-
-	// Send AWS credential and KMS keyId to the server running in enclave
-	b, err := json.Marshal(playload)
-	if err != nil {
-		fmt.Println(err)
-	}
-	unix.Write(socket, b)
-
-	// receive data from the server and save to dynamodb with the walletName
-	response := make([]byte, 4096)
-	n, err := unix.Read(socket, response)
-	if err != nil {
-		fmt.Println(err)
-	}
-	var responseStruct generateAccountResponse
-	json.Unmarshal(response[:n], &responseStruct)
-
-	ac.saveEncryptAccountToDDB(name, responseStruct, ac.keyId, chainType)
-
-}
-
-func (ac accountClient) saveEncryptAccountToDDB(name string, response generateAccountResponse, keyId string, chainType string) {
-	// Create Session
-	sess, err := session.NewSession(&aws.Config{
-		Region: aws.String(ac.region)},
-	)
-
-	if err != nil {
-		panic(err)
-	}
-
-	svc := dynamodb.New(sess)
-
-	at := accountTable{
-		Name:                name,
-		KeyId:               keyId,
-		ChainType:           chainType,
-		Address:             response.Address,
-		EncryptedPrivateKey: response.EncryptedPrivateKey,
-		EncryptedDataKey:    response.EncryptedDataKey,
-	}
-
-	av, err := dynamodbattribute.MarshalMap(at)
-
-	if err != nil {
-		fmt.Println("Got error marshalling map:")
-		fmt.Println(err.Error())
-	}
-
-	input := &dynamodb.PutItemInput{
-		Item:      av,
-		TableName: aws.String(ac.ddbTableName),
-	}
-
-	_, err = svc.PutItem(input)
-	if err != nil {
-		fmt.Println("Got error calling PutItem:")
-		fmt.Println(err.Error())
-	}
-	fmt.Println("account", name, "info is saved to dynamodb")
-}
-
-func (ac accountClient) sign(keyId string, name string, chainType string, transaction string) string {
-	credential := getIAMTokenV2()
-	// get item from dynamodb
-	sess, err := session.NewSession(&aws.Config{
-		Region: aws.String(ac.region)},
-	)
-
-	if err != nil {
-		panic(err)
-	}
-
-	svc := dynamodb.New(sess)
-
-	result, _ := svc.GetItem(&dynamodb.GetItemInput{
-		TableName: aws.String(ac.ddbTableName),
-		Key: map[string]*dynamodb.AttributeValue{
-			"KeyId": {
-				S: aws.String(keyId),
-			},
-			"Name": {
-				S: aws.String(name),
-			},
-			"ChainType": {
-				S: aws.String(chainType),
-			},
-		},
-	})
-
-	if err != nil {
-		fmt.Println("ddb query err:", err)
-	}
-
-	var at accountTable
-	err = dynamodbattribute.UnmarshalMap(result.Item, &at)
-	if err != nil {
-		panic(fmt.Sprintf("Failed to unmarshal Record, %v", err))
-	}
-	var encryptedDataKey = at.EncryptedDataKey
-	var encryptedPrivateKey = at.EncryptedPrivateKey
-
-	fmt.Println(at)
-
-	socket, err := unix.Socket(unix.AF_VSOCK, unix.SOCK_STREAM, 0)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	sockaddr := &unix.SockaddrVM{
-		CID:  ac.cid,
-		Port: ac.port,
-	}
-
-	err = unix.Connect(socket, sockaddr)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	playload := requestPlayload{
-		ApiCall:               "sign",
-		Aws_access_key_id:     credential.aws_access_key_id,
-		Aws_secret_access_key: credential.aws_secret_access_key,
-		Aws_session_token:     credential.aws_session_token,
-		KeyId:                 "",
-		ChainType:             chainType,
-		EncryptedPrivateKey:   encryptedPrivateKey,
-		EncryptedDataKey:      encryptedDataKey,
-		Transaction:           transaction,
-	}
-
-	// Send AWS credential and KMS keyId to the server running in enclave
-	b, err := json.Marshal(playload)
-	if err != nil {
-		log.Fatal(err)
-	}
-	unix.Write(socket, b)
-	// receive data from the server and save to dynamodb with the walletName
-	response := make([]byte, 4096)
-	n, err := unix.Read(socket, response)
-	if err != nil {
-		fmt.Println(err)
-	}
-	signedValue := hexutil.Encode(response[:n])
-	return signedValue
-}
-
 type iamCredentialResponse struct {
 	aws_access_key_id     string
 	aws_secret_access_key string
 	aws_session_token     string
+}
+
+type accountClient struct {
+	region       string
+	ddbTableName string // 表名前缀
+	keyId        string
+	cid          uint32 // CID for VSOCK
+	port         uint32 // Port for VSOCK
+	chainType    string
+}
+
+// 根据链类型获取表名
+func (ac accountClient) getTableName(chainType string) string {
+	return ac.ddbTableName + "_" + chainType
+}
+
+type generateAccountResponse struct {
+	Address             string `json:"address"`
+	EncryptedDataKey    string `json:"encryptedDataKey"`
+	EncryptedPrivateKey string `json:"encryptedPrivateKey"`
 }
 
 // struct of response from metadata get function
@@ -264,34 +82,6 @@ type iamCredentialToken struct {
 	SecretAccessKey string
 	Token           string
 	Expiration      string
-}
-
-/**
-* get the credential of the IAM Role attached on EC2 using IMDSv1 (legacy method)
- */
-func getIAMToken() iamCredentialResponse {
-	var token iamCredentialResponse
-	res, err := http.Get("http://169.254.169.254/latest/meta-data/iam/security-credentials/")
-	if err != nil {
-		log.Fatal(err)
-	}
-	body, _ := io.ReadAll(res.Body)
-	res.Body.Close()
-	instanceProfileName := string(body)
-	profileUri := fmt.Sprintf("http://169.254.169.254/latest/meta-data/iam/security-credentials/%s", instanceProfileName)
-	res, err = http.Get(profileUri)
-	if err != nil {
-		log.Fatal(err)
-	}
-	body, _ = io.ReadAll(res.Body)
-	res.Body.Close()
-	var result iamCredentialToken
-	json.Unmarshal(body, &result)
-	token.aws_access_key_id = result.AccessKeyId
-	token.aws_secret_access_key = result.SecretAccessKey
-	token.aws_session_token = result.Token
-
-	return token
 }
 
 /**
@@ -315,6 +105,10 @@ func getIAMTokenV2() iamCredentialResponse {
 		log.Fatalf("Error getting token: %v", err)
 	}
 	defer tokenResp.Body.Close()
+
+	if tokenResp.StatusCode != 200 {
+		log.Fatalf("Error getting token, status code: %d", tokenResp.StatusCode)
+	}
 
 	tokenBytes, err := io.ReadAll(tokenResp.Body)
 	if err != nil {
@@ -366,8 +160,6 @@ func getIAMTokenV2() iamCredentialResponse {
 		log.Fatalf("Error unmarshaling credentials: %v", err)
 	}
 
-	fmt.Println("Retrieved credentials using IMDSv2")
-
 	token.aws_access_key_id = result.AccessKeyId
 	token.aws_secret_access_key = result.SecretAccessKey
 	token.aws_session_token = result.Token
@@ -375,61 +167,297 @@ func getIAMTokenV2() iamCredentialResponse {
 	return token
 }
 
-/**
-* 创建 EVM 账户
-* go run appClient.go account1 EVM
-*
-* 创建 Solana 账户
-* go run appClient.go solana_account1 SOLANA
- */
-func main() {
-	region := "ap-northeast-1"
-	keyId := "fb852884-e2f0-4a06-9bfe-edd5d0792b46"
-	tableName := "AccountTable"
-
-	// 默认账户名和链类型
-	walletAccountName := "account1"
-	chainType := "EVM"
-
-	// 从命令行参数获取账户名和链类型
-	if len(os.Args) > 1 {
-		walletAccountName = os.Args[1]
-		fmt.Println("使用命令行指定的账户名:", walletAccountName)
-	}
-
-	if len(os.Args) > 2 {
-		chainType = strings.ToUpper(os.Args[2])
-		fmt.Println("使用命令行指定的链类型:", chainType)
-	}
-
-	// 检查链类型是否有效
-	if chainType != "EVM" && chainType != "SOLANA" {
-		fmt.Println("错误: 链类型必须是 EVM 或 SOLANA")
-		fmt.Println("用法: go run appClient.go [账户名] [链类型]")
-		fmt.Println("示例: go run appClient.go account1 EVM")
-		fmt.Println("示例: go run appClient.go solana_account1 SOLANA")
+func (ac accountClient) generateAccount(name string, chainType string) {
+	// 首先检查账户是否已存在
+	existingAccount, exists := ac.checkAccountExists(name, chainType)
+	if exists {
+		fmt.Printf("账户 %s (链类型: %s) 已存在，地址: %s\n", name, chainType, existingAccount.Address)
 		return
 	}
 
-	// check dynamodb AccountTable exist or not, create it if not exists
+	// 获取 IAM 凭证
+	credential := getIAMTokenV2()
+
+	// 创建 VSOCK 连接
+	socket, err := unix.Socket(unix.AF_VSOCK, unix.SOCK_STREAM, 0)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	sockaddr := &unix.SockaddrVM{
+		CID:  ac.cid,
+		Port: ac.port,
+	}
+
+	err = unix.Connect(socket, sockaddr)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// 准备请求负载
+	playload := requestPlayload{
+		ApiCall:               "generateAccount",
+		Aws_access_key_id:     credential.aws_access_key_id,
+		Aws_secret_access_key: credential.aws_secret_access_key,
+		Aws_session_token:     credential.aws_session_token,
+		KeyId:                 ac.keyId,
+		ChainType:             chainType,
+		EncryptedPrivateKey:   "",
+		EncryptedDataKey:      "",
+		Transaction:           "",
+	}
+
+	// 发送 AWS 凭证和 KMS keyId 到运行在 enclave 中的服务器
+	b, err := json.Marshal(playload)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	unix.Write(socket, b)
+
+	// 接收来自服务器的数据并使用钱包名称保存到 DynamoDB
+	response := make([]byte, 4096)
+	n, err := unix.Read(socket, response)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	var responseStruct generateAccountResponse
+	err = json.Unmarshal(response[:n], &responseStruct)
+	if err != nil {
+		fmt.Println("解析响应失败:", err)
+		return
+	}
+
+	// 保存账户信息到 DynamoDB
+	ac.saveEncryptAccountToDDB(name, chainType, responseStruct)
+
+	// 输出成功信息
+	fmt.Printf("成功创建账户 %s (链类型: %s)，地址: %s\n", name, chainType, responseStruct.Address)
+}
+
+// 检查账户是否已存在于 DynamoDB 中
+func (ac accountClient) checkAccountExists(name string, chainType string) (accountTable, bool) {
+	sess, err := session.NewSession(&aws.Config{
+		Region: aws.String(ac.region)},
+	)
+	if err != nil {
+		fmt.Println("创建 AWS 会话失败:", err)
+		return accountTable{}, false
+	}
+
+	svc := dynamodb.New(sess)
+
+	// 获取特定链类型的表名
+	tableName := ac.getTableName(chainType)
+
+	// 准备查询参数
+	result, err := svc.GetItem(&dynamodb.GetItemInput{
+		TableName: aws.String(tableName),
+		Key: map[string]*dynamodb.AttributeValue{
+			"KeyId": {
+				S: aws.String(ac.keyId),
+			},
+			"Name": {
+				S: aws.String(name),
+			},
+		},
+	})
+
+	// 如果查询出错，返回 false
+	if err != nil {
+		fmt.Println("查询 DynamoDB 失败:", err)
+		return accountTable{}, false
+	}
+
+	// 如果没有找到记录，返回 false
+	if result.Item == nil || len(result.Item) == 0 {
+		return accountTable{}, false
+	}
+
+	// 解析查询结果
+	var account accountTable
+	err = dynamodbattribute.UnmarshalMap(result.Item, &account)
+	if err != nil {
+		fmt.Println("解析 DynamoDB 结果失败:", err)
+		return accountTable{}, false
+	}
+
+	return account, true
+}
+
+func (ac accountClient) saveEncryptAccountToDDB(name string, chainType string, response generateAccountResponse) {
+	sess, err := session.NewSession(&aws.Config{
+		Region: aws.String(ac.region)},
+	)
+
+	if err != nil {
+		fmt.Println("Got error creating session:")
+		fmt.Println(err.Error())
+		return
+	}
+
+	svc := dynamodb.New(sess)
+
+	// 获取特定链类型的表名
+	tableName := ac.getTableName(chainType)
+
+	// 准备保存的数据
+	item := accountTable{
+		KeyId:               ac.keyId,
+		Name:                name,
+		Address:             response.Address,
+		EncryptedDataKey:    response.EncryptedDataKey,
+		EncryptedPrivateKey: response.EncryptedPrivateKey,
+	}
+
+	av, err := dynamodbattribute.MarshalMap(item)
+
+	if err != nil {
+		fmt.Println("Got error marshalling map:")
+		fmt.Println(err.Error())
+	}
+
+	input := &dynamodb.PutItemInput{
+		Item:      av,
+		TableName: aws.String(tableName),
+	}
+
+	_, err = svc.PutItem(input)
+	if err != nil {
+		fmt.Println("Got error calling PutItem:")
+		fmt.Println(err.Error())
+	}
+	fmt.Println("account", name, "info is saved to table", tableName)
+}
+
+func (ac accountClient) sign(keyId string, name string, chainType string, transaction string) string {
+	// 获取 AWS 凭证
+	credential := getIAMTokenV2()
+
+	sess, err := session.NewSession(&aws.Config{
+		Region: aws.String(ac.region)},
+	)
+
+	if err != nil {
+		fmt.Println("Got error creating session:")
+		fmt.Println(err.Error())
+		return ""
+	}
+
+	svc := dynamodb.New(sess)
+
+	// 获取特定链类型的表名
+	tableName := ac.getTableName(chainType)
+
+	// 使用表名和主键查询
+	result, err := svc.GetItem(&dynamodb.GetItemInput{
+		TableName: aws.String(tableName),
+		Key: map[string]*dynamodb.AttributeValue{
+			"KeyId": {
+				S: aws.String(keyId),
+			},
+			"Name": {
+				S: aws.String(name),
+			},
+		},
+	})
+
+	if err != nil {
+		fmt.Println("DynamoDB 查询错误:", err)
+		return ""
+	}
+
+	// 检查是否找到记录
+	if result.Item == nil || len(result.Item) == 0 {
+		fmt.Printf("未找到账户 KeyId=%s, Name=%s, ChainType=%s\n", keyId, name, chainType)
+		return ""
+	}
+
+	// 解析查询结果
+	var at accountTable
+	err = dynamodbattribute.UnmarshalMap(result.Item, &at)
+	if err != nil {
+		fmt.Println("解析账户数据失败:", err)
+		return ""
+	}
+
+	// 验证必要的字段是否存在
+	if at.EncryptedDataKey == "" || at.EncryptedPrivateKey == "" {
+		fmt.Println("账户数据不完整: 缺失加密私钥或数据密钥")
+		return ""
+	}
+
+	// 创建 VSOCK 连接
+	socket, err := unix.Socket(unix.AF_VSOCK, unix.SOCK_STREAM, 0)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	sockaddr := &unix.SockaddrVM{
+		CID:  ac.cid,
+		Port: ac.port,
+	}
+
+	err = unix.Connect(socket, sockaddr)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// 准备请求负载
+	playload := requestPlayload{
+		ApiCall:               "sign",
+		Aws_access_key_id:     credential.aws_access_key_id,
+		Aws_secret_access_key: credential.aws_secret_access_key,
+		Aws_session_token:     credential.aws_session_token,
+		KeyId:                 keyId,
+		ChainType:             chainType,
+		EncryptedPrivateKey:   at.EncryptedPrivateKey,
+		EncryptedDataKey:      at.EncryptedDataKey,
+		Transaction:           transaction,
+	}
+
+	// 发送请求到 enclave
+	b, err := json.Marshal(playload)
+	if err != nil {
+		fmt.Println(err)
+		return ""
+	}
+	unix.Write(socket, b)
+
+	// receive data from the server and save to dynamodb with the walletName
+	response := make([]byte, 4096)
+	n, err := unix.Read(socket, response)
+	if err != nil {
+		fmt.Println(err)
+	}
+	signedValue := hexutil.Encode(response[:n])
+	return signedValue
+}
+
+// 创建按链类型分表的 DynamoDB 表
+func createDynamoDBTable(region string, tableNamePrefix string, chainType string) {
+	// 生成完整表名
+	tableName := tableNamePrefix + "_" + chainType
+
 	sess, err := session.NewSession(&aws.Config{
 		Region: aws.String(region)},
 	)
 
 	if err != nil {
-		panic(err)
+		fmt.Println(err.Error())
+		return
 	}
 
 	svc := dynamodb.New(sess)
-	describe_input := &dynamodb.DescribeTableInput{
-		TableName: aws.String(tableName),
-	}
 
-	result, err := svc.DescribeTable(describe_input)
+	// 检查表是否已存在
+	_, err = svc.DescribeTable(&dynamodb.DescribeTableInput{
+		TableName: aws.String(tableName),
+	})
+
 	if err != nil {
-		fmt.Println(err)
-		fmt.Println(result)
-		fmt.Println("create the table", tableName)
+		// 如果表不存在，创建表
 		create_input := &dynamodb.CreateTableInput{
 			AttributeDefinitions: []*dynamodb.AttributeDefinition{
 				{
@@ -440,11 +468,8 @@ func main() {
 					AttributeName: aws.String("Name"),
 					AttributeType: aws.String("S"),
 				},
-				{
-					AttributeName: aws.String("ChainType"),
-					AttributeType: aws.String("S"),
-				},
 			},
+			// 使用 KeyId 和 Name 作为复合主键
 			KeySchema: []*dynamodb.KeySchemaElement{
 				{
 					AttributeName: aws.String("KeyId"),
@@ -455,28 +480,6 @@ func main() {
 					KeyType:       aws.String("RANGE"),
 				},
 			},
-			GlobalSecondaryIndexes: []*dynamodb.GlobalSecondaryIndex{
-				{
-					IndexName: aws.String("ChainTypeIndex"),
-					KeySchema: []*dynamodb.KeySchemaElement{
-						{
-							AttributeName: aws.String("KeyId"),
-							KeyType:       aws.String("HASH"),
-						},
-						{
-							AttributeName: aws.String("ChainType"),
-							KeyType:       aws.String("RANGE"),
-						},
-					},
-					Projection: &dynamodb.Projection{
-						ProjectionType: aws.String("ALL"),
-					},
-					ProvisionedThroughput: &dynamodb.ProvisionedThroughput{
-						ReadCapacityUnits:  aws.Int64(5),
-						WriteCapacityUnits: aws.Int64(5),
-					},
-				},
-			},
 			ProvisionedThroughput: &dynamodb.ProvisionedThroughput{
 				ReadCapacityUnits:  aws.Int64(5),
 				WriteCapacityUnits: aws.Int64(5),
@@ -484,18 +487,77 @@ func main() {
 			TableName: aws.String(tableName),
 		}
 
-		result, err := svc.CreateTable(create_input)
+		// 创建表
+		_, err := svc.CreateTable(create_input)
 		if err != nil {
-			fmt.Println(err.Error())
-			fmt.Println(result)
+			fmt.Println("创建表失败:", err.Error())
+			return // 如果创建表失败，直接返回
 		}
-		// sleep 10 second to wait for dynamodb creating
-		time.Sleep(10 * 1000 * time.Millisecond)
+
+		fmt.Println("表", tableName, "创建中，等待表变为活跃状态...")
+
+		// 等待表变为活跃状态（使用轮询方式）
+		for i := 0; i < 10; i++ { // 最多尝试 10 次，每次等待 3 秒
+			describe, err := svc.DescribeTable(&dynamodb.DescribeTableInput{
+				TableName: aws.String(tableName),
+			})
+
+			if err != nil {
+				fmt.Println("检查表状态失败:", err.Error())
+				time.Sleep(3 * time.Second)
+				continue
+			}
+
+			if *describe.Table.TableStatus == "ACTIVE" {
+				fmt.Println("表", tableName, "创建成功并已活跃")
+				break
+			}
+
+			fmt.Println("表状态:", *describe.Table.TableStatus, "，继续等待...")
+			time.Sleep(3 * time.Second)
+		}
+	} else {
+		fmt.Println("表", tableName, "已存在")
+	}
+}
+
+func main() {
+	region := "ap-northeast-1"
+	keyId := "fb852884-e2f0-4a06-9bfe-edd5d0792b46"
+	tableNamePrefix := "AccountTable"
+
+	walletAccountName := "account1"
+	chainType := "EVM"
+
+	if len(os.Args) > 1 {
+		walletAccountName = os.Args[1]
+		fmt.Println("使用命令行指定的账户名:", walletAccountName)
 	}
 
-	// 设置默认链类型
-	defaultChainType := "EVM"
-	client := accountClient{region, tableName, keyId, 16, 5000, defaultChainType}
+	if len(os.Args) > 2 {
+		chainType = strings.ToUpper(os.Args[2])
+		fmt.Println("使用命令行指定的链类型:", chainType)
+	}
+
+	if chainType != "EVM" && chainType != "SOLANA" {
+		fmt.Println("错误: 链类型必须是 EVM 或 SOLANA")
+		fmt.Println("用法: go run appClient.go [账户名] [链类型]")
+		fmt.Println("示例: go run appClient.go account1 EVM")
+		fmt.Println("示例: go run appClient.go solana_account1 SOLANA")
+		return
+	}
+
+	createDynamoDBTable(region, tableNamePrefix, chainType)
+
+	// 创建客户端实例
+	client := accountClient{
+		region:       region,
+		ddbTableName: tableNamePrefix,
+		keyId:        keyId,
+		cid:          16,   // CID for VSOCK
+		port:         5000, // Port for VSOCK
+		chainType:    chainType,
+	}
 
 	// 生成账户
 	fmt.Printf("正在为账户 %s 生成 %s 类型的地址...\n", walletAccountName, chainType)
@@ -506,21 +568,20 @@ func main() {
 
 	//测试签名
 	transaction := map[string]interface{}{
-		"value":    1000000000,
+		"value":    10000000000000,
 		"to":       "0xF0109fC8DF283027b6285cc889F5aA624EaC1F55",
 		"nonce":    0,
-		"chainId":  4,
-		"gas":      100000,
-		"gasPrice": 234567897654321,
+		"chainId":  97,
+		"gas":      21000,
+		"gasPrice": 10,
 	}
 
 	b := new(bytes.Buffer)
 	for key, value := range transaction {
-		fmt.Fprintf(b, "%s=\"%s\"\n", key, value)
+		fmt.Fprintf(b, "%s=\"%v\"\n", key, value)
 	}
 
 	// 签名
 	signedValue := client.sign(keyId, walletAccountName, chainType, b.String())
-	fmt.Println("签名结果:", signedValue)
-
+	fmt.Println("Signed Response:", signedValue)
 }

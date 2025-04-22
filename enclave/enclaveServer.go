@@ -143,8 +143,7 @@ func generateAccount(aws_access_key_id string, aws_secret_access_key string, aws
 		}
 
 		privateKeyBytes = crypto.FromECDSA(privateKey)
-		// todo delete
-		fmt.Println("SAVE BUT DO NOT SHARE THIS (Private Key):", hexutil.Encode(privateKeyBytes))
+		// fmt.Println("SAVE BUT DO NOT SHARE THIS (Private Key):", hexutil.Encode(privateKeyBytes))
 
 		publicKey := privateKey.Public()
 		publicKeyECDSA, ok := publicKey.(*ecdsa.PublicKey)
@@ -190,6 +189,15 @@ func generateAccount(aws_access_key_id string, aws_secret_access_key string, aws
 }
 
 func sign(aws_access_key_id string, aws_secret_access_key string, aws_session_token string, encryptedDataKey string, encryptedPrivateKey string, transaction string, chainType string) []byte {
+
+	fmt.Println("aws_access_key_id: ", aws_access_key_id)
+	fmt.Println("aws_secret_access_key: ", aws_secret_access_key)
+	fmt.Println("aws_session_token: ", aws_session_token)
+	fmt.Println("encryptedDataKey: ", encryptedDataKey)
+	fmt.Println("encryptedPrivateKey: ", encryptedPrivateKey)
+	fmt.Println("transaction: ", transaction)
+	fmt.Println("chainType: ", chainType)
+
 	// Decrypt the data key using AWS KMS
 	datakey_plaintext_base64 := call_kms_decrypt(aws_access_key_id, aws_secret_access_key, aws_session_token, encryptedDataKey)
 	datakey_plaintext_base64_string := strings.TrimSpace(strings.Split(datakey_plaintext_base64, ":")[1])
