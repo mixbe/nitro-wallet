@@ -11,4 +11,4 @@ ENV REGION ap-northeast-1
 RUN chmod +x kmstool_enclave_cli
 RUN chmod +x enclaveServer
 
-CMD ["./app/enclaveServer"]
+CMD ["/app/enclaveServer"]
