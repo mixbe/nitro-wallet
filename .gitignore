@@ -1,3 +1,4 @@
 enclave/enclaveServer
 client/appClient
+evm_wallet.key
 .idea

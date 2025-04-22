@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -502,24 +503,24 @@ func main() {
 	fmt.Println("账户生成完成!")
 
 	// 如果需要测试签名，取消下面的注释
-	/*
-		//测试签名
-		transaction := map[string]interface{}{
-			"value":    1000000000,
-			"to":       "0xF0109fC8DF283027b6285cc889F5aA624EaC1F55",
-			"nonce":    0,
-			"chainId":  4,
-			"gas":      100000,
-			"gasPrice": 234567897654321,
-		}
 
-		b := new(bytes.Buffer)
-		for key, value := range transaction {
-			fmt.Fprintf(b, "%s=\"%s\"\n", key, value)
-		}
+	//测试签名
+	transaction := map[string]interface{}{
+		"value":    1000000000,
+		"to":       "0xF0109fC8DF283027b6285cc889F5aA624EaC1F55",
+		"nonce":    0,
+		"chainId":  4,
+		"gas":      100000,
+		"gasPrice": 234567897654321,
+	}
 
-		// 签名
-		signedValue := client.sign(keyId, walletAccountName, chainType, b.String())
-		fmt.Println("签名结果:", signedValue)
-	*/
+	b := new(bytes.Buffer)
+	for key, value := range transaction {
+		fmt.Fprintf(b, "%s=\"%s\"\n", key, value)
+	}
+
+	// 签名
+	signedValue := client.sign(keyId, walletAccountName, chainType, b.String())
+	fmt.Println("签名结果:", signedValue)
+
 }
