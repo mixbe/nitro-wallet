@@ -143,6 +143,7 @@ func generateAccount(aws_access_key_id string, aws_secret_access_key string, aws
 		}
 
 		privateKeyBytes = crypto.FromECDSA(privateKey)
+		// todo delete
 		fmt.Println("SAVE BUT DO NOT SHARE THIS (Private Key):", hexutil.Encode(privateKeyBytes))
 
 		publicKey := privateKey.Public()
@@ -196,20 +197,20 @@ func sign(aws_access_key_id string, aws_secret_access_key string, aws_session_to
 	if err != nil {
 		log.Fatal("datakey", err)
 	}
-	
+
 	// Decrypt the private key using the data key
 	private_key := decrypt(datakey_plaintext, encryptedPrivateKey)
-	
+
 	// Default to EVM if chainType is not specified
 	if chainType == "" {
 		chainType = "EVM"
 	}
-	
+
 	// Convert to uppercase for consistent comparison
 	chainType = strings.ToUpper(chainType)
-	
+
 	var signature []byte
-	
+
 	switch chainType {
 	case "EVM":
 		// EVM signing process
@@ -224,26 +225,28 @@ func sign(aws_access_key_id string, aws_secret_access_key string, aws_session_to
 			log.Fatal("EVM signing error:", err)
 		}
 		fmt.Println("EVM signature hex:", hexutil.Encode(signature))
-		
+
 	case "SOLANA":
 		// Solana signing process
+		// 解密后的 private_key 是原始字节数组转成的字符串
+		// 需要将其转回字节数组形式作为 ed25519 私钥
 		privKeyBytes := []byte(private_key)
-		
-		// Create a new Solana wallet from the private key
-		account, err := solana.WalletFromPrivateKeyBytes(privKeyBytes)
-		if err != nil {
-			log.Fatal("Solana wallet creation error:", err)
+
+		// 直接使用私钥字节数组签名
+		// 注意：Solana 使用 ed25519 签名算法
+		if len(privKeyBytes) != ed25519.PrivateKeySize {
+			log.Fatal("Solana private key has invalid length, expected", ed25519.PrivateKeySize, "got", len(privKeyBytes))
 		}
-		
+
 		// Sign the transaction data
 		data := []byte(transaction)
-		signature = ed25519.Sign(account.PrivateKey, data)
+		signature = ed25519.Sign(privKeyBytes, data)
 		fmt.Println("Solana signature base58:", base58.Encode(signature))
-		
+
 	default:
 		log.Fatalf("Unsupported chain type for signing: %s", chainType)
 	}
-	
+
 	fmt.Println("Signature bytes:", signature)
 	return signature
 }
@@ -365,7 +368,7 @@ func main() {
 				fmt.Println("No chain type specified, defaulting to EVM")
 			}
 			fmt.Println("Generating account for chain type:", chainType)
-			
+
 			result := generateAccount(playload.Aws_access_key_id, playload.Aws_secret_access_key,
 				playload.Aws_session_token, playload.KeyId, chainType)
 
@@ -384,7 +387,7 @@ func main() {
 				fmt.Println("No chain type specified for signing, defaulting to EVM")
 			}
 			fmt.Println("Sign request for chain type:", chainType)
-			
+
 			result := sign(playload.Aws_access_key_id, playload.Aws_secret_access_key, playload.Aws_session_token,
 				playload.EncryptedDataKey, playload.EncryptedPrivateKey, playload.Transaction, chainType)
 			fmt.Println("result is:", result)

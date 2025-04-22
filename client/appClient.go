@@ -373,12 +373,41 @@ func getIAMTokenV2() iamCredentialResponse {
 	return token
 }
 
+/**	
+* 创建 EVM 账户
+* go run appClient.go account1 EVM
+*
+* 创建 Solana 账户
+* go run appClient.go solana_account1 SOLANA
+*/
 func main() {
-
 	region := "ap-northeast-1"
 	keyId := "fb852884-e2f0-4a06-9bfe-edd5d0792b46"
+	tableName := "AccountTable"
+	
+	// 默认账户名和链类型
 	walletAccountName := "account1"
-	tableName :="AccountTable"
+	chainType := "EVM"
+	
+	// 从命令行参数获取账户名和链类型
+	if len(os.Args) > 1 {
+		walletAccountName = os.Args[1]
+		fmt.Println("使用命令行指定的账户名:", walletAccountName)
+	}
+	
+	if len(os.Args) > 2 {
+		chainType = strings.ToUpper(os.Args[2])
+		fmt.Println("使用命令行指定的链类型:", chainType)
+	}
+	
+	// 检查链类型是否有效
+	if chainType != "EVM" && chainType != "SOLANA" {
+		fmt.Println("错误: 链类型必须是 EVM 或 SOLANA")
+		fmt.Println("用法: go run appClient.go [账户名] [链类型]")
+		fmt.Println("示例: go run appClient.go account1 EVM")
+		fmt.Println("示例: go run appClient.go solana_account1 SOLANA")
+		return
+	}
 	
 	// check dynamodb AccountTable exist or not, create it if not exists
 	sess, err := session.NewSession(&aws.Config{
@@ -398,7 +427,7 @@ func main() {
 	if err != nil {
 		fmt.Println(err)
 		fmt.Println(result)
-		fmt.Println("create the table",tableName)
+		fmt.Println("create the table", tableName)
 		create_input := &dynamodb.CreateTableInput{
 			AttributeDefinitions: []*dynamodb.AttributeDefinition{
 				{
@@ -462,17 +491,18 @@ func main() {
 		time.Sleep(10 * 1000 * time.Millisecond)
 	}
 
-	// Default to EVM for backward compatibility
+	// 设置默认链类型
 	defaultChainType := "EVM"
 	client := accountClient{region, tableName, keyId, 16, 5000, defaultChainType}
-	// Generate an EVM account
-	client.generateAccount(walletAccountName, "EVM")
 	
-	// Generate a Solana account with a different name
-	solanaAccountName := "solana_account1"
-	client.generateAccount(solanaAccountName, "SOLANA")
-
-	//test sign
+	// 生成账户
+	fmt.Printf("正在为账户 %s 生成 %s 类型的地址...\n", walletAccountName, chainType)
+	client.generateAccount(walletAccountName, chainType)
+	fmt.Println("账户生成完成!")
+	
+	// 如果需要测试签名，取消下面的注释
+	/*
+	//测试签名
 	transaction := map[string]interface{}{
 		"value":    1000000000,
 		"to":       "0xF0109fC8DF283027b6285cc889F5aA624EaC1F55",
@@ -487,7 +517,8 @@ func main() {
 		fmt.Fprintf(b, "%s=\"%s\"\n", key, value)
 	}
 
-	// Sign with the EVM account
-	signedValue := client.sign(keyId, walletAccountName, "EVM", b.String())
-	fmt.Println("signedValue:", signedValue)
+	// 签名
+	signedValue := client.sign(keyId, walletAccountName, chainType, b.String())
+	fmt.Println("签名结果:", signedValue)
+	*/
 }
